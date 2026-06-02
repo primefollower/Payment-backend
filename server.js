@@ -1,4 +1,5 @@
 const express = require('express');
+const fetch = require('node-fetch');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const aiChatRoutes = require('./ai-chat');
