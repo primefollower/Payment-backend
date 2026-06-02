@@ -50,6 +50,9 @@ app.post('/create-order', async (req, res) => {
       });
     }
 
+
+
+
     const orderId = `PF_${Date.now()}`;
 
     const apiUrl = CASHFREE_MODE === 'production' 
@@ -79,17 +82,23 @@ app.post('/create-order', async (req, res) => {
       })
     });
 
+
+
+
+
+    
+
     const data = await response.json();
 
     console.log("💰 Cashfree Status:", response.status);
     console.log("💰 Cashfree Response:", JSON.stringify(data, null, 2));
 
     if (response.ok && data.payment_session_id) {
-      res.json({
-        success: true,
-        payment_session_id: data.payment_session_id,
-        order_id: orderId
-      });
+    res.json({
+  success: true,
+  payment_session_id: data.payment_session_id,
+  orderId: orderId
+});
     } else {
       res.status(response.status || 400).json({ 
         success: false, 
@@ -108,6 +117,71 @@ app.post('/create-order', async (req, res) => {
     });
   }
 });
+
+
+
+
+// === VERIFY PAYMENT ENDPOINT ===
+app.post('/verify-payment', async (req, res) => {
+  try {
+    const { orderId } = req.body;
+
+    console.log("VERIFY REQUEST:", orderId);
+
+    if (!orderId) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing orderId"
+      });
+    }
+
+    const apiUrl = CASHFREE_MODE === 'production'
+      ? `https://api.cashfree.com/pg/orders/${orderId}`
+      : `https://sandbox.cashfree.com/pg/orders/${orderId}`;
+
+    const response = await fetch(apiUrl, {
+      method: 'GET',
+      headers: {
+        'x-api-version': '2023-08-01',
+        'x-client-id': CASHFREE_APP_ID,
+        'x-client-secret': CASHFREE_SECRET
+      }
+    });
+
+    const data = await response.json();
+
+    console.log("VERIFY RESPONSE:", data);
+
+    // SUCCESS ONLY WHEN REAL PAYMENT HAPPENED
+  if (
+  data.order_status === "PAID" ||
+  data.order_status === "SUCCESS"
+) {
+  return res.json({
+    success: true,
+    orderId
+  });
+}
+
+    // Cancel / Back / Close / Failed payment
+    return res.json({
+      success: false,
+      message: "Payment not completed"
+    });
+
+  } catch (err) {
+    console.error("VERIFY ERROR:", err);
+
+    res.status(500).json({
+      success: false,
+      message: "Verification failed"
+    });
+  }
+});
+
+
+
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
