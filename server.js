@@ -4,9 +4,11 @@ require('dotenv').config();
 
 const app = express();
 app.use(express.json());
-app.use(cors({
-  origin: "*"  // Change to your domain later for production
-}));
+app.use(cors({ origin: "*" }));
+
+// Debug: Log environment variables (remove after testing)
+console.log("CASHFREE_APP_ID:", process.env.CASHFREE_APP_ID ? "✅ Loaded" : "❌ MISSING");
+console.log("CASHFREE_SECRET_KEY:", process.env.CASHFREE_SECRET_KEY ? "✅ Loaded" : "❌ MISSING");
 
 const CASHFREE_APP_ID = process.env.CASHFREE_APP_ID;
 const CASHFREE_SECRET = process.env.CASHFREE_SECRET_KEY;
@@ -17,6 +19,13 @@ app.post('/create-order', async (req, res) => {
 
     if (!amount || !userId) {
       return res.status(400).json({ success: false, message: "Missing data" });
+    }
+
+    if (!CASHFREE_APP_ID || !CASHFREE_SECRET) {
+      return res.status(500).json({ 
+        success: false, 
+        message: "Server configuration error - Keys missing" 
+      });
     }
 
     const orderId = `PF_${Date.now()}`;
@@ -51,11 +60,12 @@ app.post('/create-order', async (req, res) => {
         order_id: orderId
       });
     } else {
+      console.error("Cashfree Error:", data);
       res.status(400).json({ success: false, message: data.message || "Failed" });
     }
 
   } catch (err) {
-    console.error(err);
+    console.error("Backend Error:", err);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
