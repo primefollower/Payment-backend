@@ -138,11 +138,12 @@ app.post('/verify-payment', async (req, res) => {
     if (data.order_status === "PAID") {
       const paymentRef = db.collection("payment_events").doc(orderId);
       if (!(await paymentRef.get()).exists) {
-        await paymentRef.set({
+    await paymentRef.set({
           orderId,
           status: "paid",
           processed: false,
           amount: data.order_amount,
+          followers: 0,
           userId: data.customer_details?.customer_id || "",
           createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
@@ -181,19 +182,24 @@ app.post('/cashfree-webhook', async (req, res) => {
     }
 
     const payload = JSON.parse(rawBody);
-    const { order_id, order_status, order_amount } = payload.data || payload;
+    const orderData = payload.data?.order || payload.data || payload;
+    const { order_id, order_status, order_amount } = orderData;
+    const customerId = payload.data?.customer_details?.customer_id 
+      || payload.data?.order?.customer_details?.customer_id 
+      || "";
 
     console.log(`🔔 Webhook: ${order_id} → ${order_status}`);
 
     if (order_status === "PAID") {
       const paymentRef = db.collection("payment_events").doc(order_id);
       if (!(await paymentRef.get()).exists) {
-        await paymentRef.set({
+     await paymentRef.set({
           orderId: order_id,
           status: "paid",
           processed: false,
           amount: order_amount,
-          userId: payload.data?.customer_details?.customer_id || "",
+          followers: 0,
+          userId: customerId,
           createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
         console.log(`✅ Webhook recorded payment: ${order_id}`);
