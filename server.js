@@ -3,8 +3,20 @@ const fetch = require('node-fetch');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const aiChatRoutes = require('./ai-chat');
+const admin = require('firebase-admin');
 
 dotenv.config();
+
+admin.initializeApp({
+  credential: admin.credential.cert({
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY
+      ?.replace(/\\n/g, '\n')
+  })
+});
+
+const db = admin.firestore();
 
 const app = express();
 app.use(cors({ origin: "*" }));
@@ -153,10 +165,24 @@ app.post('/verify-payment', async (req, res) => {
     console.log("VERIFY RESPONSE:", data);
 
     // SUCCESS ONLY WHEN REAL PAYMENT HAPPENED
-  if (
+if (
   data.order_status === "PAID" ||
   data.order_status === "SUCCESS"
 ) {
+
+  await db.collection("payment_events")
+    .doc(orderId)
+    .set({
+      orderId,
+      status: "paid",
+      processed: false,
+      amount: data.order_amount || 0,
+      userId:
+        data.customer_details?.customer_id || "",
+      createdAt:
+        admin.firestore.FieldValue.serverTimestamp()
+    });
+
   return res.json({
     success: true,
     orderId
