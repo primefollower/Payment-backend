@@ -9,7 +9,7 @@
 "express": "^4.19.0",
 "cors": "^2.8.5",
 "dotenv": "^16.4.0",
-"node-fetch": "^2.7.0"
+"node-fetch": "^2.7.0",
+"firebase-admin": "^13.0.0"
 }
-
 }
