@@ -46,7 +46,11 @@ app.post('/create-order', async (req, res) => {
       email: email ? email.substring(0,5)+"..." : null 
     });
 
-    if (!amount || !userId) {
+  if (
+  !amount ||
+  !userId ||
+  Number(amount) <= 0
+){
       return res.status(400).json({ success: false, message: "Missing amount or userId" });
     }
 
@@ -101,6 +105,9 @@ app.post('/create-order', async (req, res) => {
     
 
     const data = await response.json();
+
+
+
 
     console.log("💰 Cashfree Status:", response.status);
     console.log("💰 Cashfree Response:", JSON.stringify(data, null, 2));
@@ -162,7 +169,12 @@ app.post('/verify-payment', async (req, res) => {
 
     const data = await response.json();
 
-    console.log("VERIFY RESPONSE:", data);
+console.log("VERIFY RESPONSE:", data);
+
+console.log(
+  "PAYMENT STATUS:",
+  data.order_status
+);
 
     // SUCCESS ONLY WHEN REAL PAYMENT HAPPENED
 if (
@@ -170,18 +182,25 @@ if (
   data.order_status === "SUCCESS"
 ) {
 
-  await db.collection("payment_events")
-    .doc(orderId)
-    .set({
-      orderId,
-      status: "paid",
-      processed: false,
-      amount: data.order_amount || 0,
-      userId:
-        data.customer_details?.customer_id || "",
-      createdAt:
-        admin.firestore.FieldValue.serverTimestamp()
-    });
+const paymentRef = db
+  .collection("payment_events")
+  .doc(orderId);
+
+const existingPayment =
+  await paymentRef.get();
+
+if (!existingPayment.exists) {
+  await paymentRef.set({
+    orderId,
+    status: "paid",
+    processed: false,
+    amount: data.order_amount || 0,
+    userId:
+      data.customer_details?.customer_id || "",
+    createdAt:
+      admin.firestore.FieldValue.serverTimestamp()
+  });
+}
 
   return res.json({
     success: true,
