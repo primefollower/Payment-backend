@@ -39,14 +39,16 @@ console.log("App ID Loaded:", CASHFREE_APP_ID ? "✅ YES" : "❌ NO");
 console.log("Secret Loaded:", CASHFREE_SECRET ? `✅ YES (length: ${CASHFREE_SECRET.length})` : "❌ NO");
 
 // === CREATE ORDER ENDPOINT ===
+// === CREATE ORDER ENDPOINT ===
 app.post('/create-order', async (req, res) => {
   try {
-    const { amount, userId, username, email } = req.body;
+    const { amount, userId, username, email, followers } = req.body;
 
     console.log("📥 Create Order Request:", { 
       amount, 
       userId, 
-      username, 
+      username,
+      followers,
       email: email ? email.substring(0,5)+"..." : null 
     });
 
@@ -95,6 +97,16 @@ app.post('/create-order', async (req, res) => {
     console.log("Cashfree Response:", JSON.stringify(data, null, 2));
 
     if (response.ok && data.payment_session_id) {
+      // Save order metadata to Firestore for recovery
+      await db.collection('pending_payments').doc(orderId).set({
+        orderId,
+        userId,
+        amount: Number(amount),
+        followers: Number(followers) || 0,
+        status: 'pending',
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+
       res.json({
         success: true,
         payment_session_id: data.payment_session_id,
@@ -137,13 +149,26 @@ app.post('/verify-payment', async (req, res) => {
 
     if (data.order_status === "PAID") {
       const paymentRef = db.collection("payment_events").doc(orderId);
-      if (!(await paymentRef.get()).exists) {
-    await paymentRef.set({
+      const paymentSnap = await paymentRef.get();
+      
+      if (!paymentSnap.exists) {
+        // Get followers count from pending_payments
+        let followers = 0;
+        try {
+          const pendingSnap = await db.collection('pending_payments').doc(orderId).get();
+          if (pendingSnap.exists) {
+            followers = pendingSnap.data().followers || 0;
+          }
+        } catch (e) {
+          console.warn("Could not fetch pending_payments:", e);
+        }
+
+        await paymentRef.set({
           orderId,
           status: "paid",
           processed: false,
           amount: data.order_amount,
-          followers: 0,
+          followers: followers,
           userId: data.customer_details?.customer_id || "",
           createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
@@ -189,20 +214,30 @@ app.post('/cashfree-webhook', async (req, res) => {
       || "";
 
     console.log(`🔔 Webhook: ${order_id} → ${order_status}`);
-
     if (order_status === "PAID") {
       const paymentRef = db.collection("payment_events").doc(order_id);
       if (!(await paymentRef.get()).exists) {
-     await paymentRef.set({
+        // Get followers count from pending_payments
+        let followers = 0;
+        try {
+          const pendingSnap = await db.collection('pending_payments').doc(order_id).get();
+          if (pendingSnap.exists) {
+            followers = pendingSnap.data().followers || 0;
+          }
+        } catch (e) {
+          console.warn("Webhook: Could not fetch pending_payments:", e);
+        }
+
+        await paymentRef.set({
           orderId: order_id,
           status: "paid",
           processed: false,
           amount: order_amount,
-          followers: 0,
+          followers: followers,
           userId: customerId,
           createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
-        console.log(`✅ Webhook recorded payment: ${order_id}`);
+        console.log(`✅ Webhook recorded payment: ${order_id} (${followers} followers)`);
       }
     }
 
