@@ -248,6 +248,55 @@ app.post('/cashfree-webhook', async (req, res) => {
   }
 });
 
+
+// === PRIME AI CHAT ENDPOINT ===
+app.post('/chat', async (req, res) => {
+  try {
+    const { messages } = req.body;
+
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({ error: "Messages array required" });
+    }
+
+    const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+
+    if (!OPENROUTER_API_KEY) {
+      return res.status(500).json({ error: "AI API key not configured" });
+    }
+
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'HTTP-Referer': 'https://primefollower.github.io',
+        'X-Title': 'Prime Follower'
+      },
+      body: JSON.stringify({
+        model: 'google/gemini-2.0-flash-001',
+        messages: messages
+      })
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error("OpenRouter error:", JSON.stringify(data));
+      return res.status(response.status).json({ error: data });
+    }
+
+    const reply = data.choices?.[0]?.message?.content || "Sorry, I couldn't process that right now 😊";
+
+    res.json({ reply });
+
+  } catch (err) {
+    console.error("Chat endpoint error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT} | Mode: ${CASHFREE_MODE}`);
