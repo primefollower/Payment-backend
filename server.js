@@ -176,7 +176,7 @@ app.post('/verify-payment', async (req, res) => {
       return res.json({ success: true, orderId });
     }
 
-    res.json({ success: false, message: `Payment ${data.order_status}` });
+    res.json({ success: false, message: `Payment ${data.order_status || 'PENDING'}` });
 
   } catch (err) {
     console.error("Verify Error:", err);
@@ -273,7 +273,7 @@ app.post('/chat', async (req, res) => {
         'X-Title': 'Prime Follower'
       },
       body: JSON.stringify({
-        model: 'google/gemini-2.0-flash-001',
+        model: 'google/gemini-2.0-flash-exp',
         messages: messages
       })
     });
