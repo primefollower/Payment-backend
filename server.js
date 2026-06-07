@@ -176,7 +176,7 @@ app.post('/verify-payment', async (req, res) => {
       return res.json({ success: true, orderId });
     }
 
-    res.json({ success: false, message: `Payment ${data.order_status || 'PENDING'}` });
+    res.json({ success: false, message: `Payment ${data.order_status}` });
 
   } catch (err) {
     console.error("Verify Error:", err);
@@ -248,54 +248,48 @@ app.post('/cashfree-webhook', async (req, res) => {
   }
 });
 
-
 // === PRIME AI CHAT ENDPOINT ===
 app.post('/chat', async (req, res) => {
   try {
     const { messages } = req.body;
 
-    if (!messages || !Array.isArray(messages)) {
-      return res.status(400).json({ error: "Messages array required" });
-    }
-
-    const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-
-    if (!OPENROUTER_API_KEY) {
-      return res.status(500).json({ error: "AI API key not configured" });
-    }
-
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-        'HTTP-Referer': 'https://primefollower.github.io',
-        'X-Title': 'Prime Follower'
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-2.0-flash-exp',
-        messages: messages
-      })
-    });
+    const response = await fetch(
+      'https://openrouter.ai/api/v1/chat/completions',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'google/gemini-2.0-flash-001',
+          messages,
+          temperature: 0.7,
+          max_tokens: 200
+        })
+      }
+    );
 
     const data = await response.json();
 
     if (!response.ok) {
       console.error("OpenRouter error:", JSON.stringify(data));
-      return res.status(response.status).json({ error: data });
+      return res.status(response.status).json({
+        error: data.error?.message || "AI request failed"
+      });
     }
 
-    const reply = data.choices?.[0]?.message?.content || "Sorry, I couldn't process that right now 😊";
-
-    res.json({ reply });
+    res.json({
+      reply:
+        data.choices?.[0]?.message?.content ||
+        "⚠️ I couldn't generate a reply."
+    });
 
   } catch (err) {
-    console.error("Chat endpoint error:", err);
-    res.status(500).json({ error: "Internal server error" });
+    console.error("Chat error:", err);
+    res.status(500).json({ error: 'Failed to generate response' });
   }
 });
-
-
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
