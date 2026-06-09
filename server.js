@@ -21,7 +21,6 @@ const app = express();
 // Middleware
 app.use(cors({ origin: "*" }));
 
-// Important: For webhook signature verification
 app.use(express.json({
   verify: (req, res, buf) => {
     req.rawBody = buf.toString();
@@ -33,23 +32,25 @@ app.use(express.urlencoded({ extended: true }));
 const CASHFREE_APP_ID = process.env.CASHFREE_APP_ID;
 const CASHFREE_SECRET = process.env.CASHFREE_SECRET;
 const CASHFREE_MODE = (process.env.CASHFREE_MODE || 'sandbox').toLowerCase();
+const ADMIN_SECRET = process.env.ADMIN_SECRET;
 
 console.log("🚀 Backend Mode:", CASHFREE_MODE);
 console.log("App ID Loaded:", CASHFREE_APP_ID ? "✅ YES" : "❌ NO");
 console.log("Secret Loaded:", CASHFREE_SECRET ? `✅ YES (length: ${CASHFREE_SECRET.length})` : "❌ NO");
+console.log("Admin Secret Loaded:", ADMIN_SECRET ? "✅ YES" : "❌ NO");
 
-// === CREATE ORDER ENDPOINT ===
-// === CREATE ORDER ENDPOINT ===
+// ════════════════════════════════════════════════════
+// CASHFREE PAYMENT SYSTEM
+// ════════════════════════════════════════════════════
+
+// === CREATE ORDER ===
 app.post('/create-order', async (req, res) => {
   try {
     const { amount, userId, username, email, followers } = req.body;
 
-    console.log("📥 Create Order Request:", { 
-      amount, 
-      userId, 
-      username,
-      followers,
-      email: email ? email.substring(0,5)+"..." : null 
+    console.log("📥 Create Order Request:", {
+      amount, userId, username, followers,
+      email: email ? email.substring(0, 5) + "..." : null
     });
 
     if (!amount || !userId || Number(amount) <= 0) {
@@ -57,8 +58,8 @@ app.post('/create-order', async (req, res) => {
     }
 
     if (!CASHFREE_APP_ID || !CASHFREE_SECRET) {
-      return res.status(500).json({ 
-        success: false, 
+      return res.status(500).json({
+        success: false,
         message: "Cashfree keys not configured",
         debug: { appId: !!CASHFREE_APP_ID, secret: !!CASHFREE_SECRET }
       });
@@ -66,8 +67,8 @@ app.post('/create-order', async (req, res) => {
 
     const orderId = `PF_${Date.now()}`;
 
-    const apiUrl = CASHFREE_MODE === 'production' 
-      ? "https://api.cashfree.com/pg/orders" 
+    const apiUrl = CASHFREE_MODE === 'production'
+      ? "https://api.cashfree.com/pg/orders"
       : "https://sandbox.cashfree.com/pg/orders";
 
     const response = await fetch(apiUrl, {
@@ -97,7 +98,6 @@ app.post('/create-order', async (req, res) => {
     console.log("Cashfree Response:", JSON.stringify(data, null, 2));
 
     if (response.ok && data.payment_session_id) {
-      // Save order metadata to Firestore for recovery
       await db.collection('pending_payments').doc(orderId).set({
         orderId,
         userId,
@@ -113,8 +113,8 @@ app.post('/create-order', async (req, res) => {
         orderId: orderId
       });
     } else {
-      res.status(response.status || 400).json({ 
-        success: false, 
+      res.status(response.status || 400).json({
+        success: false,
         message: data.message || "Cashfree failed",
         error: data
       });
@@ -150,9 +150,8 @@ app.post('/verify-payment', async (req, res) => {
     if (data.order_status === "PAID") {
       const paymentRef = db.collection("payment_events").doc(orderId);
       const paymentSnap = await paymentRef.get();
-      
+
       if (!paymentSnap.exists) {
-        // Get followers count from pending_payments
         let followers = 0;
         try {
           const pendingSnap = await db.collection('pending_payments').doc(orderId).get();
@@ -184,7 +183,7 @@ app.post('/verify-payment', async (req, res) => {
   }
 });
 
-// === CASHFREE WEBHOOK (Main Success Handler) ===
+// === CASHFREE WEBHOOK ===
 app.post('/cashfree-webhook', async (req, res) => {
   try {
     const signature = req.headers['x-webhook-signature'];
@@ -195,7 +194,6 @@ app.post('/cashfree-webhook', async (req, res) => {
       return res.status(400).json({ success: false });
     }
 
-    // Verify signature
     const expectedSig = crypto
       .createHmac('sha256', CASHFREE_SECRET)
       .update(`${timestamp}.${rawBody}`)
@@ -209,15 +207,15 @@ app.post('/cashfree-webhook', async (req, res) => {
     const payload = JSON.parse(rawBody);
     const orderData = payload.data?.order || payload.data || payload;
     const { order_id, order_status, order_amount } = orderData;
-    const customerId = payload.data?.customer_details?.customer_id 
-      || payload.data?.order?.customer_details?.customer_id 
+    const customerId = payload.data?.customer_details?.customer_id
+      || payload.data?.order?.customer_details?.customer_id
       || "";
 
     console.log(`🔔 Webhook: ${order_id} → ${order_status}`);
+
     if (order_status === "PAID") {
       const paymentRef = db.collection("payment_events").doc(order_id);
       if (!(await paymentRef.get()).exists) {
-        // Get followers count from pending_payments
         let followers = 0;
         try {
           const pendingSnap = await db.collection('pending_payments').doc(order_id).get();
@@ -248,7 +246,10 @@ app.post('/cashfree-webhook', async (req, res) => {
   }
 });
 
-// === PRIME AI CHAT ENDPOINT ===
+// ════════════════════════════════════════════════════
+// PRIME AI CHAT
+// ════════════════════════════════════════════════════
+
 app.post('/chat', async (req, res) => {
   try {
     const { messages } = req.body;
@@ -280,9 +281,7 @@ app.post('/chat', async (req, res) => {
     }
 
     res.json({
-      reply:
-        data.choices?.[0]?.message?.content ||
-        "⚠️ I couldn't generate a reply."
+      reply: data.choices?.[0]?.message?.content || "⚠️ I couldn't generate a reply."
     });
 
   } catch (err) {
@@ -294,8 +293,6 @@ app.post('/chat', async (req, res) => {
 // ════════════════════════════════════════════════════
 // COUPON SYSTEM
 // ════════════════════════════════════════════════════
-
-const ADMIN_SECRET = process.env.ADMIN_SECRET;
 
 // Helper: admin auth check
 function isAdmin(req) {
@@ -326,12 +323,13 @@ app.post('/create-coupon', async (req, res) => {
   try {
     if (!isAdmin(req)) return res.status(403).json({ success: false, message: "Unauthorized" });
 
-    let { code, discount, validFor, expiry, maxUses } = req.body;
+    let { code, discount, validFor, expiry, maxUses, maxDiscount } = req.body;
 
     code = (code && code.trim()) ? code.trim().toUpperCase() : generateCouponCode();
     discount = Number(discount);
     maxUses = Number(maxUses) || 0;
-    validFor = validFor || "both"; // credits | paidOrders | both
+    maxDiscount = Number(maxDiscount) || 0;
+    validFor = validFor || "both";
 
     if (!discount || discount <= 0 || discount > 100) {
       return res.status(400).json({ success: false, message: "Discount must be 1-100" });
@@ -349,6 +347,7 @@ app.post('/create-coupon', async (req, res) => {
       validFor,
       expiry: expiry || null,
       maxUses,
+      maxDiscount,
       usedCount: 0,
       active: true,
       createdAt: admin.firestore.FieldValue.serverTimestamp()
@@ -374,6 +373,7 @@ app.post('/list-coupons', async (req, res) => {
       return {
         id: d.id,
         ...data,
+        maxDiscount: data.maxDiscount || 0,
         createdAt: data.createdAt?.toDate?.()?.toISOString() || null,
         status: getCouponStatus(data)
       };
@@ -386,7 +386,7 @@ app.post('/list-coupons', async (req, res) => {
   }
 });
 
-// ── UPDATE / ENABLE / DISABLE COUPON (admin) ──
+// ── UPDATE COUPON (admin) ──
 app.post('/update-coupon', async (req, res) => {
   try {
     if (!isAdmin(req)) return res.status(403).json({ success: false, message: "Unauthorized" });
@@ -399,6 +399,7 @@ app.post('/update-coupon', async (req, res) => {
     if (updates.validFor !== undefined) allowed.validFor = updates.validFor;
     if (updates.expiry !== undefined) allowed.expiry = updates.expiry;
     if (updates.maxUses !== undefined) allowed.maxUses = Number(updates.maxUses);
+    if (updates.maxDiscount !== undefined) allowed.maxDiscount = Number(updates.maxDiscount);
     if (updates.active !== undefined) allowed.active = !!updates.active;
 
     await db.collection('coupons').doc(id).update(allowed);
@@ -428,12 +429,12 @@ app.post('/delete-coupon', async (req, res) => {
 // ── VALIDATE COUPON (public — during checkout) ──
 app.post('/validate-coupon', async (req, res) => {
   try {
-    let { code, orderType, amount } = req.body;
+    let { code, orderType, amount, userId } = req.body;
     // orderType: "credits" or "paidOrders"
     // amount: original price (credits number OR rupees)
 
     if (!code || !orderType || amount === undefined) {
-      return res.status(400).json({ valid: false, message: "Missing fields" });
+      return res.json({ valid: false, message: "Missing fields" });
     }
 
     code = code.trim().toUpperCase();
@@ -458,20 +459,52 @@ app.post('/validate-coupon', async (req, res) => {
 
     // validFor check
     if (c.validFor !== "both" && c.validFor !== orderType) {
-      return res.json({ valid: false, message: "Coupon not valid for this order type" });
+      const typeLabel = orderType === "credits" ? "credit orders" : "paid orders";
+      return res.json({ valid: false, message: `This coupon is not valid for ${typeLabel}` });
     }
 
-    const discountAmount = Math.round((amount * c.discount) / 100);
-    const finalPrice = Math.max(amount - discountAmount, 0);
+    // Check if user already used this coupon (optional - per user limit)
+    if (userId) {
+      const userRedemption = await db.collection('coupon_redemptions')
+        .where('couponId', '==', docSnap.id)
+        .where('userId', '==', userId)
+        .limit(1)
+        .get();
+
+      if (!userRedemption.empty) {
+        return res.json({ valid: false, message: "You have already used this coupon" });
+      }
+    }
+
+    // Calculate discount with maxDiscount cap
+    let discountAmount = Math.round((amount * c.discount) / 100);
+
+    // Apply maxDiscount cap if set
+    const maxDiscountCap = c.maxDiscount || 0;
+    if (maxDiscountCap > 0) {
+      discountAmount = Math.min(discountAmount, maxDiscountCap);
+    }
+
+    const finalPrice = Math.max(Math.round(amount - discountAmount), orderType === "paidOrders" ? 1 : 0);
+
+    // Build message
+    let message = `${c.discount}% OFF applied!`;
+    if (maxDiscountCap > 0) {
+      const unit = orderType === "paidOrders" ? "₹" : "";
+      const unitAfter = orderType === "credits" ? " Credits" : "";
+      message = `${c.discount}% OFF (upto ${unit}${maxDiscountCap}${unitAfter}) applied!`;
+    }
 
     res.json({
       valid: true,
       couponId: docSnap.id,
       code: c.code,
       discount: c.discount,
+      maxDiscount: maxDiscountCap,
       discountAmount,
       finalPrice,
-      message: `Coupon applied! ${c.discount}% off`
+      originalPrice: amount,
+      message
     });
 
   } catch (err) {
@@ -514,6 +547,173 @@ app.post('/redeem-coupon', async (req, res) => {
     res.status(500).json({ success: false, message: err.message || "Server error" });
   }
 });
+
+
+
+// ════════════════════════════════════════════════════
+// INSTAGRAM CONNECT (Username Lookup)
+// ════════════════════════════════════════════════════
+
+app.post('/instagram-lookup', async (req, res) => {
+  try {
+    const { username } = req.body;
+    if (!username) {
+      return res.json({ success: false, message: "Username required" });
+    }
+
+    const cleanUsername = username.replace(/^@/, '').trim().toLowerCase();
+    if (!cleanUsername || cleanUsername.length < 1) {
+      return res.json({ success: false, message: "Invalid username" });
+    }
+
+    // Try multiple data sources for Instagram profile
+    let profileData = null;
+
+    // Method 1: Try i.instagram.com endpoint
+    try {
+      const resp = await fetch(`https://i.instagram.com/api/v1/users/web_profile_info/?username=${cleanUsername}`, {
+        headers: {
+          'User-Agent': 'Instagram 275.0.0.27.98 Android (33/13; 420dpi; 1080x2400; samsung; SM-G991B; o1s; exynos2100; en_US; 458229237)',
+          'X-IG-App-ID': '936619743392459'
+        }
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        const user = data?.data?.user;
+        if (user) {
+          profileData = {
+            username: user.username,
+            fullName: user.full_name || user.username,
+            profilePic: user.profile_pic_url || user.profile_pic_url_hd || "",
+            isPrivate: user.is_private || false,
+            profileLink: `https://www.instagram.com/${user.username}/`
+          };
+        }
+      }
+    } catch (e) {
+      console.warn("Method 1 failed:", e.message);
+    }
+
+    // Method 2: Fallback - scrape public page
+    if (!profileData) {
+      try {
+        const resp = await fetch(`https://www.instagram.com/${cleanUsername}/?__a=1&__d=dis`, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+            'Accept': 'application/json',
+            'X-IG-App-ID': '936619743392459'
+          }
+        });
+        if (resp.ok) {
+          const text = await resp.text();
+          try {
+            const data = JSON.parse(text);
+            const user = data?.graphql?.user || data?.user;
+            if (user) {
+              profileData = {
+                username: user.username,
+                fullName: user.full_name || user.username,
+                profilePic: user.profile_pic_url_hd || user.profile_pic_url || "",
+                isPrivate: user.is_private || false,
+                profileLink: `https://www.instagram.com/${user.username}/`
+              };
+            }
+          } catch (parseErr) {
+            console.warn("JSON parse failed for method 2");
+          }
+        }
+      } catch (e) {
+        console.warn("Method 2 failed:", e.message);
+      }
+    }
+
+    // Method 3: Basic fallback - just validate username exists
+    if (!profileData) {
+      try {
+        const resp = await fetch(`https://www.instagram.com/${cleanUsername}/`, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          },
+          redirect: 'follow'
+        });
+        if (resp.ok) {
+          const html = await resp.text();
+          if (html.includes(`"username":"${cleanUsername}"`) || html.includes(`@${cleanUsername}`)) {
+            // Extract what we can from meta tags
+            const ogImageMatch = html.match(/property="og:image"\s+content="([^"]+)"/);
+            const titleMatch = html.match(/property="og:title"\s+content="([^"]+)"/);
+            const isPrivate = html.includes('"is_private":true');
+
+            let fullName = cleanUsername;
+            if (titleMatch) {
+              const parts = titleMatch[1].split('(');
+              if (parts[0]) fullName = parts[0].trim();
+            }
+
+            profileData = {
+              username: cleanUsername,
+              fullName: fullName,
+              profilePic: ogImageMatch ? ogImageMatch[1] : "",
+              isPrivate: isPrivate,
+              profileLink: `https://www.instagram.com/${cleanUsername}/`
+            };
+          }
+        }
+      } catch (e) {
+        console.warn("Method 3 failed:", e.message);
+      }
+    }
+
+    if (!profileData) {
+      return res.json({ success: false, message: "Instagram account not found" });
+    }
+
+    // Proxy the profile picture to avoid CORS issues
+    if (profileData.profilePic) {
+      try {
+        const imgResp = await fetch(profileData.profilePic, {
+          headers: { 'User-Agent': 'Mozilla/5.0' }
+        });
+        if (imgResp.ok) {
+          const buffer = await imgResp.buffer();
+          const base64 = buffer.toString('base64');
+          const contentType = imgResp.headers.get('content-type') || 'image/jpeg';
+          profileData.profilePicBase64 = `data:${contentType};base64,${base64}`;
+        }
+      } catch (imgErr) {
+        console.warn("Profile pic proxy failed:", imgErr.message);
+        profileData.profilePicBase64 = "";
+      }
+    }
+
+    res.json({ success: true, profile: profileData });
+
+  } catch (err) {
+    console.error("instagram-lookup error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// ════════════════════════════════════════════════════
+// HEALTH CHECK
+// ════════════════════════════════════════════════════
+
+app.get('/', (req, res) => {
+  res.json({
+    status: "ok",
+    service: "Prime Follower Backend",
+    mode: CASHFREE_MODE,
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: "healthy", uptime: process.uptime() });
+});
+
+// ════════════════════════════════════════════════════
+// START SERVER
+// ════════════════════════════════════════════════════
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
