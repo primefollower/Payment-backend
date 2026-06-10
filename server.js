@@ -323,13 +323,15 @@ app.post('/create-coupon', async (req, res) => {
   try {
     if (!isAdmin(req)) return res.status(403).json({ success: false, message: "Unauthorized" });
 
-    let { code, discount, validFor, expiry, maxUses, maxDiscount } = req.body;
+    let { code, discount, validFor, expiry, maxUses, maxDiscount, level } = req.body;
 
     code = (code && code.trim()) ? code.trim().toUpperCase() : generateCouponCode();
     discount = Number(discount);
     maxUses = Number(maxUses) || 0;
     maxDiscount = Number(maxDiscount) || 0;
     validFor = validFor || "both";
+    // level: 0 = any level, or 1-5 for a specific level requirement
+    level = Number(level) || 0;
 
     if (!discount || discount <= 0 || discount > 100) {
       return res.status(400).json({ success: false, message: "Discount must be 1-100" });
@@ -348,6 +350,7 @@ app.post('/create-coupon', async (req, res) => {
       expiry: expiry || null,
       maxUses,
       maxDiscount,
+      level,
       usedCount: 0,
       active: true,
       createdAt: admin.firestore.FieldValue.serverTimestamp()
@@ -374,6 +377,7 @@ app.post('/list-coupons', async (req, res) => {
         id: d.id,
         ...data,
         maxDiscount: data.maxDiscount || 0,
+        level: data.level || 0,
         createdAt: data.createdAt?.toDate?.()?.toISOString() || null,
         status: getCouponStatus(data)
       };
@@ -400,6 +404,7 @@ app.post('/update-coupon', async (req, res) => {
     if (updates.expiry !== undefined) allowed.expiry = updates.expiry;
     if (updates.maxUses !== undefined) allowed.maxUses = Number(updates.maxUses);
     if (updates.maxDiscount !== undefined) allowed.maxDiscount = Number(updates.maxDiscount);
+    if (updates.level !== undefined) allowed.level = Number(updates.level) || 0;
     if (updates.active !== undefined) allowed.active = !!updates.active;
 
     await db.collection('coupons').doc(id).update(allowed);
@@ -461,6 +466,24 @@ app.post('/validate-coupon', async (req, res) => {
     if (c.validFor !== "both" && c.validFor !== orderType) {
       const typeLabel = orderType === "credits" ? "credit orders" : "paid orders";
       return res.json({ valid: false, message: `This coupon is not valid for ${typeLabel}` });
+    }
+
+    // Level restriction check
+    const requiredLevel = c.level || 0;
+    if (requiredLevel > 0) {
+      const LEVEL_NAMES = { 1: "Prime Starter", 2: "Prime Lion", 3: "Prime Shark", 4: "Prime Elite", 5: "Prime Member" };
+      if (!userId) {
+        return res.json({ valid: false, message: `This coupon is only for ${LEVEL_NAMES[requiredLevel]}` });
+      }
+      try {
+        const uSnap = await db.collection('users').doc(userId).get();
+        const uLevel = uSnap.exists ? (uSnap.data().level || 1) : 1;
+        if (uLevel !== requiredLevel) {
+          return res.json({ valid: false, message: `Only for ${LEVEL_NAMES[requiredLevel]}` });
+        }
+      } catch (e) {
+        return res.json({ valid: false, message: "Could not verify your level" });
+      }
     }
 
     // Check if user already used this coupon (optional - per user limit)
@@ -668,11 +691,16 @@ app.post('/instagram-lookup', async (req, res) => {
       return res.json({ success: false, message: "Instagram account not found" });
     }
 
-    // Proxy the profile picture to avoid CORS issues
+    // Proxy the profile picture to base64 (Instagram CDN blocks direct hotlinking with 403)
+    profileData.profilePicBase64 = "";
     if (profileData.profilePic) {
       try {
         const imgResp = await fetch(profileData.profilePic, {
-          headers: { 'User-Agent': 'Mozilla/5.0' }
+          headers: {
+            'User-Agent': 'Instagram 275.0.0.27.98 Android (33/13; 420dpi; 1080x2400; samsung; SM-G991B; o1s; exynos2100; en_US; 458229237)',
+            'Accept': 'image/webp,image/jpeg,image/png,*/*',
+            'Referer': 'https://www.instagram.com/'
+          }
         });
         if (imgResp.ok) {
           const buffer = await imgResp.buffer();
@@ -682,15 +710,199 @@ app.post('/instagram-lookup', async (req, res) => {
         }
       } catch (imgErr) {
         console.warn("Profile pic proxy failed:", imgErr.message);
-        profileData.profilePicBase64 = "";
       }
     }
+    // Never send the raw CDN url to the client (it will 403). Only base64.
+    profileData.profilePic = "";
 
     res.json({ success: true, profile: profileData });
 
   } catch (err) {
     console.error("instagram-lookup error:", err);
     res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+
+
+// ════════════════════════════════════════════════════
+// ADMIN — ORDERS (Credit / Paid / Bonus)
+// ════════════════════════════════════════════════════
+
+// Helper: enrich an order with user details
+async function enrichOrderWithUser(order) {
+  let userEmail = "", userName = "";
+  try {
+    if (order.user_id) {
+      const uSnap = await db.collection('users').doc(order.user_id).get();
+      if (uSnap.exists) {
+        const u = uSnap.data();
+        userEmail = u.email || "";
+        userName = u.username || "";
+      }
+    }
+  } catch (e) { /* ignore */ }
+  return { ...order, userEmail, userName };
+}
+
+// ── LIST CREDIT ORDERS (admin) ──
+app.post('/admin-credit-orders', async (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(403).json({ success: false, message: "Unauthorized" });
+
+    const snap = await db.collection('orders')
+      .orderBy('order_time', 'desc')
+      .limit(200)
+      .get();
+
+    const orders = [];
+    for (const d of snap.docs) {
+      const o = d.data();
+      // Credit orders: NOT paid, NOT bonus, AND credits_spent > 0 (skip free 3-follower first order)
+      const isPaid = o.isPaidOrder === true;
+      const isBonus = o.isViralBonus || o.isDay3Bonus || o.isLevelReward;
+      const isDiamond = o.isDiamondOrder === true;
+      const spent = Number(o.credits_spent || 0);
+      if (isPaid || isBonus) continue;
+      // Include credit orders (spent>0) and diamond orders
+      if (spent <= 0 && !isDiamond) continue;
+
+      const enriched = await enrichOrderWithUser({
+        id: d.id,
+        user_id: o.user_id,
+        instagram_username: o.instagram_username || "",
+        instagram_link: o.instagram_link || "",
+        followers: o.followers || 0,
+        credits_spent: spent,
+        isDiamondOrder: isDiamond,
+        diamondCost: o.diamondCost || 0,
+        status: o.status || "processing",
+        order_time: o.order_time?.toDate?.()?.toISOString() || null
+      });
+      orders.push(enriched);
+    }
+
+    res.json({ success: true, orders });
+  } catch (err) {
+    console.error("admin-credit-orders error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// ── LIST PAID ORDERS (admin) ──
+app.post('/admin-paid-orders', async (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(403).json({ success: false, message: "Unauthorized" });
+
+    const snap = await db.collection('orders')
+      .where('isPaidOrder', '==', true)
+      .orderBy('order_time', 'desc')
+      .limit(200)
+      .get();
+
+    const orders = [];
+    for (const d of snap.docs) {
+      const o = d.data();
+      const enriched = await enrichOrderWithUser({
+        id: d.id,
+        user_id: o.user_id,
+        instagram_username: o.instagram_username || "",
+        instagram_link: o.instagram_link || "",
+        followers: o.followers || 0,
+        paidAmount: o.paidAmount || 0,
+        status: o.status || "processing",
+        order_time: o.order_time?.toDate?.()?.toISOString() || null
+      });
+      orders.push(enriched);
+    }
+
+    res.json({ success: true, orders });
+  } catch (err) {
+    console.error("admin-paid-orders error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// ── LIST BONUS ORDERS (admin) — all free / bonus orders ──
+app.post('/admin-bonus-orders', async (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(403).json({ success: false, message: "Unauthorized" });
+
+    const snap = await db.collection('orders')
+      .orderBy('order_time', 'desc')
+      .limit(300)
+      .get();
+
+    const orders = [];
+    for (const d of snap.docs) {
+      const o = d.data();
+      const isPaid = o.isPaidOrder === true;
+      const spent = Number(o.credits_spent || 0);
+      const isViral = o.isViralBonus === true;
+      const isDay3 = o.isDay3Bonus === true;
+      const isLevelReward = o.isLevelReward === true;
+      const isFreeFirst = (o.followers === 3 && spent === 0 && !isViral && !isDay3 && !isLevelReward && o.isDiamondOrder !== true);
+
+      // Bonus = free (0 credit) orders that are NOT paid and NOT diamond
+      const isBonus = (isViral || isDay3 || isLevelReward || isFreeFirst);
+      if (isPaid || !isBonus) continue;
+
+      let bonusType = "Free";
+      if (isViral) bonusType = "Prime Viral Bonus";
+      else if (isDay3) bonusType = "Day 3 (50 Free)";
+      else if (isLevelReward) bonusType = "Level Free Followers";
+      else if (isFreeFirst) bonusType = "First Order Free (3)";
+
+      const enriched = await enrichOrderWithUser({
+        id: d.id,
+        user_id: o.user_id,
+        bonusType,
+        instagram_username: o.instagram_username || "",
+        instagram_link: o.instagram_link || "",
+        followers: o.followers || 0,
+        status: o.status || "processing",
+        order_time: o.order_time?.toDate?.()?.toISOString() || null
+      });
+      orders.push(enriched);
+    }
+
+    res.json({ success: true, orders });
+  } catch (err) {
+    console.error("admin-bonus-orders error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// ════════════════════════════════════════════════════
+// DIAMOND UNLOCK (secure — for level-locked orders)
+// ════════════════════════════════════════════════════
+
+app.post('/diamond-unlock', async (req, res) => {
+  try {
+    const { userId, unlockKey } = req.body;
+    if (!userId || !unlockKey) {
+      return res.json({ success: false, message: "Missing fields" });
+    }
+
+    const userRef = db.collection('users').doc(userId);
+    const result = await db.runTransaction(async (t) => {
+      const snap = await t.get(userRef);
+      if (!snap.exists) throw new Error("User not found");
+      const diamonds = snap.data().diamonds || 0;
+      if (diamonds < 1) throw new Error("Not enough diamonds");
+
+      const unlockUntil = Date.now() + 60 * 60 * 1000; // 1 hour
+      t.update(userRef, {
+        diamonds: admin.firestore.FieldValue.increment(-1),
+        [`diamondUnlocks.${unlockKey}`]: unlockUntil
+      });
+      return { unlockUntil, newDiamonds: diamonds - 1 };
+    });
+
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("diamond-unlock error:", err);
+    res.json({ success: false, message: err.message || "Server error" });
   }
 });
 
