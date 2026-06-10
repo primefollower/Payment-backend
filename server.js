@@ -874,9 +874,252 @@ app.post('/admin-bonus-orders', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════
-// DIAMOND UNLOCK (secure — for level-locked orders)
+// DIAMOND SYSTEM (secure — Admin SDK)
 // ════════════════════════════════════════════════════
 
+// ── GRANT WELCOME DIAMOND (once per user) ──
+app.post('/diamond-welcome', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) return res.json({ success: false, message: "Missing userId" });
+
+    const userRef = db.collection('users').doc(userId);
+    const result = await db.runTransaction(async (t) => {
+      const snap = await t.get(userRef);
+      if (!snap.exists) throw new Error("User not found");
+      const d = snap.data();
+      if (d.welcomeDiamondGranted === true) {
+        return { already: true, diamonds: d.diamonds || 0 };
+      }
+      t.update(userRef, {
+        diamonds: admin.firestore.FieldValue.increment(1),
+        welcomeDiamondGranted: true,
+        welcomeDiamondShown: true
+      });
+      return { already: false, diamonds: (d.diamonds || 0) + 1 };
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("diamond-welcome error:", err);
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// ── GRANT DAY-7 GRAND PRIZE DIAMOND (once per cycle) ──
+app.post('/diamond-day7', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) return res.json({ success: false, message: "Missing userId" });
+
+    const userRef = db.collection('users').doc(userId);
+    const result = await db.runTransaction(async (t) => {
+      const snap = await t.get(userRef);
+      if (!snap.exists) throw new Error("User not found");
+      const d = snap.data();
+      // Only grant if checkin day is exactly 7 (server verifies)
+      if ((d.checkinDay || 0) !== 7) throw new Error("Not eligible");
+      t.update(userRef, {
+        diamonds: admin.firestore.FieldValue.increment(1)
+      });
+      return { diamonds: (d.diamonds || 0) + 1 };
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("diamond-day7 error:", err);
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// ── GRANT SHARK LEVEL DIAMOND (once) ──
+app.post('/diamond-shark', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) return res.json({ success: false, message: "Missing userId" });
+
+    const userRef = db.collection('users').doc(userId);
+    const result = await db.runTransaction(async (t) => {
+      const snap = await t.get(userRef);
+      if (!snap.exists) throw new Error("User not found");
+      const d = snap.data();
+      const level = d.level || 1;
+      if (level < 3) throw new Error("Not Shark level yet");
+      if (d.sharkDiamondGranted === true) {
+        return { already: true, diamonds: d.diamonds || 0 };
+      }
+      t.update(userRef, {
+        diamonds: admin.firestore.FieldValue.increment(1),
+        sharkDiamondGranted: true
+      });
+      return { already: false, diamonds: (d.diamonds || 0) + 1 };
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("diamond-shark error:", err);
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// ── CLAIM LEVEL FREE FOLLOWERS (lifetime / monthly, secure) ──
+app.post('/claim-level-followers', async (req, res) => {
+  try {
+    const { userId, bonusType, instagram_username, instagram_link } = req.body;
+    // bonusType: "shark_lifetime_100" | "elite_monthly_100" | "member_monthly_250"
+    if (!userId || !bonusType) return res.json({ success: false, message: "Missing fields" });
+    if (!instagram_username) return res.json({ success: false, message: "Instagram username required" });
+
+    const userRef = db.collection('users').doc(userId);
+    const now = new Date();
+    const monthKey = `${now.getFullYear()}_${now.getMonth()}`;
+
+    const config = {
+      shark_lifetime_100: { followers: 100, minLevel: 3, flag: 'sharkLifetimeFollowersClaimed', monthly: false },
+      elite_monthly_100:  { followers: 100, minLevel: 4, flag: 'eliteMonthlyFollowersMonth',   monthly: true },
+      member_monthly_250: { followers: 250, minLevel: 5, flag: 'memberMonthlyFollowersMonth',  monthly: true }
+    };
+    const cfg = config[bonusType];
+    if (!cfg) return res.json({ success: false, message: "Invalid bonus type" });
+
+    let completionTime;
+    await db.runTransaction(async (t) => {
+      const snap = await t.get(userRef);
+      if (!snap.exists) throw new Error("User not found");
+      const d = snap.data();
+      const level = d.level || 1;
+      if (level < cfg.minLevel) throw new Error("Level requirement not met");
+
+      if (cfg.monthly) {
+        if (d[cfg.flag] === monthKey) throw new Error("Already claimed this month");
+      } else {
+        if (d[cfg.flag] === true) throw new Error("Already claimed");
+      }
+
+      const hours = d.current_delivery_hours || 24;
+      completionTime = new Date(Date.now() + hours * 60 * 60 * 1000);
+
+      const upd = { total_followers_ordered: admin.firestore.FieldValue.increment(cfg.followers) };
+      upd[cfg.flag] = cfg.monthly ? monthKey : true;
+      t.update(userRef, upd);
+    });
+
+    const orderRef = await db.collection('orders').add({
+      user_id: userId,
+      instagram_username,
+      instagram_link: instagram_link || "",
+      followers: cfg.followers,
+      credits_spent: 0,
+      isLevelReward: true,
+      levelRewardType: bonusType,
+      order_time: admin.firestore.FieldValue.serverTimestamp(),
+      completion_time: admin.firestore.Timestamp.fromDate(completionTime),
+      status: "processing"
+    });
+
+    await db.collection('transactions').add({
+      user_id: userId,
+      action: `Level Bonus - ${cfg.followers} Free Followers`,
+      amount: 0,
+      date: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    res.json({ success: true, orderId: orderRef.id });
+  } catch (err) {
+    console.error("claim-level-followers error:", err);
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// ── GET MY BONUSES STATUS (secure) ──
+app.post('/my-bonuses', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) return res.json({ success: false, message: "Missing userId" });
+
+    const snap = await db.collection('users').doc(userId).get();
+    if (!snap.exists) return res.json({ success: false, message: "User not found" });
+    const d = snap.data();
+    const now = new Date();
+    const monthKey = `${now.getFullYear()}_${now.getMonth()}`;
+    const level = d.level || 1;
+
+    res.json({
+      success: true,
+      level,
+      welcomeDiamond: d.welcomeDiamondGranted === true,
+      primeViralBonusClaimed: d.primeViralBonusClaimed === true,
+      sharkDiamondGranted: d.sharkDiamondGranted === true,
+      sharkLifetimeFollowers: d.sharkLifetimeFollowersClaimed === true,
+      eliteMonthlyClaimed: d.eliteMonthlyFollowersMonth === monthKey,
+      memberMonthlyClaimed: d.memberMonthlyFollowersMonth === monthKey
+    });
+  } catch (err) {
+    console.error("my-bonuses error:", err);
+    res.json({ success: false, message: "Server error" });
+  }
+});
+
+// ── DIAMOND ORDER (deduct diamonds + create order, secure) ──
+app.post('/diamond-order', async (req, res) => {
+  try {
+    const { userId, followers, diamondCost, instagram_username, instagram_link } = req.body;
+    if (!userId || !followers || !diamondCost) {
+      return res.json({ success: false, message: "Missing fields" });
+    }
+
+    // Validate package (only allow known diamond packages)
+    const validPackages = { 5: 400, 9: 1000 };
+    if (validPackages[diamondCost] !== Number(followers)) {
+      return res.json({ success: false, message: "Invalid diamond package" });
+    }
+
+    const userRef = db.collection('users').doc(userId);
+    let completionTime;
+    await db.runTransaction(async (t) => {
+      const snap = await t.get(userRef);
+      if (!snap.exists) throw new Error("User not found");
+      const d = snap.data();
+      const diamonds = d.diamonds || 0;
+      if (diamonds < diamondCost) throw new Error(`Not enough diamonds (need ${diamondCost})`);
+
+      const hours = d.current_delivery_hours || 24;
+      completionTime = new Date(Date.now() + hours * 60 * 60 * 1000);
+
+      t.update(userRef, {
+        diamonds: admin.firestore.FieldValue.increment(-diamondCost),
+        total_followers_ordered: admin.firestore.FieldValue.increment(Number(followers))
+      });
+    });
+
+    // Create order doc
+    const orderRef = await db.collection('orders').add({
+      user_id: userId,
+      instagram_username: instagram_username || "",
+      instagram_link: instagram_link || "",
+      followers: Number(followers),
+      credits_spent: 0,
+      diamondCost: Number(diamondCost),
+      isDiamondOrder: true,
+      order_time: admin.firestore.FieldValue.serverTimestamp(),
+      completion_time: admin.firestore.Timestamp.fromDate(completionTime),
+      status: "processing"
+    });
+
+    // Log transaction
+    await db.collection('transactions').add({
+      user_id: userId,
+      action: `Diamond Order ${followers} followers (${diamondCost} 💎)`,
+      amount: 0,
+      diamondChange: -Number(diamondCost),
+      date: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    res.json({ success: true, orderId: orderRef.id, completionTime: completionTime.toISOString() });
+  } catch (err) {
+    console.error("diamond-order error:", err);
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// ── DIAMOND UNLOCK (secure — for level-locked orders) ──
 app.post('/diamond-unlock', async (req, res) => {
   try {
     const { userId, unlockKey } = req.body;
@@ -897,6 +1140,15 @@ app.post('/diamond-unlock', async (req, res) => {
         [`diamondUnlocks.${unlockKey}`]: unlockUntil
       });
       return { unlockUntil, newDiamonds: diamonds - 1 };
+    });
+
+    // Log diamond spend
+    await db.collection('transactions').add({
+      user_id: userId,
+      action: `Diamond Unlock (${unlockKey})`,
+      amount: 0,
+      diamondChange: -1,
+      date: admin.firestore.FieldValue.serverTimestamp()
     });
 
     res.json({ success: true, ...result });
