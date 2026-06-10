@@ -247,6 +247,269 @@ app.post('/cashfree-webhook', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════
+// CREDITS — WATCH AD (server-controlled)
+// ════════════════════════════════════════════════════
+app.post('/watch-ad-reward', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) return res.json({ success: false, message: "Missing userId" });
+
+    const userRef = db.collection('users').doc(userId);
+    const result = await db.runTransaction(async (t) => {
+      const snap = await t.get(userRef);
+      if (!snap.exists) throw new Error("User not found");
+      const d = snap.data();
+
+      // Daily reset check
+      const today = new Date().toISOString().split('T')[0];
+      const adsDate = d.daily_ads_date?.toDate?.()?.toISOString().split('T')[0] || null;
+      let adsWatched = adsDate === today ? (d.daily_ads_watched || 0) : 0;
+      let dailyEarned = adsDate === today ? (d.daily_credits_earned || 0) : 0;
+
+      const adLimit = d.current_ad_limit || 10;
+      const adMultiplier = d.current_ad_multiplier || 1;
+
+      if (adsWatched >= adLimit) throw new Error(`Daily ad limit reached (${adLimit})`);
+      if (dailyEarned >= 25) throw new Error("Daily credit cap (25) reached");
+
+      const reward = Math.round(1 * adMultiplier * 10) / 10;
+
+      t.update(userRef, {
+        credits: admin.firestore.FieldValue.increment(reward),
+        daily_ads_watched: adsWatched + 1,
+        daily_credits_earned: dailyEarned + reward,
+        daily_ads_date: admin.firestore.Timestamp.now(),
+        total_earned: admin.firestore.FieldValue.increment(reward),
+        monthly_credits_earned: admin.firestore.FieldValue.increment(reward)
+      });
+
+      return { reward, adsWatched: adsWatched + 1, adLimit, newCredits: (d.credits || 0) + reward };
+    });
+
+    await db.collection('transactions').add({
+      user_id: userId,
+      action: `Watch Ad Reward`,
+      amount: result.reward,
+      date: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("watch-ad-reward error:", err);
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════
+// CREDITS — DAILY CHECK-IN (server-controlled)
+// ════════════════════════════════════════════════════
+app.post('/daily-checkin', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) return res.json({ success: false, message: "Missing userId" });
+
+    const userRef = db.collection('users').doc(userId);
+    const result = await db.runTransaction(async (t) => {
+      const snap = await t.get(userRef);
+      if (!snap.exists) throw new Error("User not found");
+      const d = snap.data();
+      const today = new Date().toISOString().split('T')[0];
+
+      // Prevent double claim
+      if (d.lastCheckinDate) {
+        const last = d.lastCheckinDate.toDate().toISOString().split('T')[0];
+        if (last === today) throw new Error("Already claimed today😅!");
+      }
+
+      // Ads watched today
+      const adsDate = d.daily_ads_date?.toDate?.()?.toISOString().split('T')[0] || null;
+      const adsToday = adsDate === today ? (d.daily_ads_watched || 0) : 0;
+
+      let checkinDay = (d.checkinDay || 0) + 1;
+      let checkinCycle = d.checkinCycle || 0;
+      if (checkinDay > 7) { checkinDay = 1; checkinCycle += 1; }
+
+      // Ad gates
+      if (checkinDay === 4 && adsToday < 5) throw new Error(`Watch ${5 - adsToday} more ads to unlock Day 4`);
+      if (checkinDay === 7 && adsToday < 10) throw new Error(`Watch ${10 - adsToday} more ads to unlock Day 7`);
+
+      let reward = 0, isOops = false, isGift = false;
+      const mult = d.current_checkin_multiplier || 1;
+      switch (checkinDay) {
+        case 1: reward = 1; break;
+        case 2: reward = 2; break;
+        case 3: reward = 2; break;
+        case 4: reward = checkinCycle === 0 ? 3 : 2; break;
+        case 5: reward = 0; isOops = true; break;
+        case 6: reward = 1; break;
+        case 7: isGift = true; reward = 0; break;
+      }
+      if (reward > 0 && !isOops && !isGift) reward = Math.round(reward * mult * 10) / 10;
+
+      const upd = {
+        lastCheckinDate: admin.firestore.Timestamp.now(),
+        last_checkin: admin.firestore.Timestamp.now(),
+        checkinDay,
+        checkinCycle,
+        checkin_streak: checkinDay,
+        total_checkins: admin.firestore.FieldValue.increment(1)
+      };
+      if (reward > 0) {
+        upd.credits = admin.firestore.FieldValue.increment(reward);
+        upd.total_earned = admin.firestore.FieldValue.increment(reward);
+        upd.monthly_credits_earned = admin.firestore.FieldValue.increment(reward);
+      }
+      t.update(userRef, upd);
+
+      return { reward, day: checkinDay, cycle: checkinCycle, isOops, isGift, newCredits: (d.credits || 0) + reward };
+    });
+
+    if (result.reward > 0) {
+      await db.collection('transactions').add({
+        user_id: userId,
+        action: `Daily Check-In (Day ${result.day})`,
+        amount: result.reward,
+        date: admin.firestore.FieldValue.serverTimestamp()
+      });
+    }
+
+    // Handle referral credit (inviter) if this user was referred
+    try {
+      const uSnap = await db.collection('users').doc(userId).get();
+      const ud = uSnap.data();
+      if (ud.referredBy && !ud.referralCredited && (ud.total_checkins || 0) >= 3) {
+        const inviterRef = db.collection('users').doc(ud.referredBy);
+        await db.runTransaction(async (t) => {
+          const inv = await t.get(inviterRef);
+          if (!inv.exists) return;
+          const invData = inv.data();
+          const newCount = (invData.referralCount || 0) + 1;
+          const REWARDS = [0, 10, 25, 0];
+          const creditReward = newCount <= 3 ? (REWARDS[newCount] || 0) : 0;
+          const invUpd = { referralCount: admin.firestore.FieldValue.increment(1) };
+          if (creditReward > 0) {
+            invUpd.credits = admin.firestore.FieldValue.increment(creditReward);
+            invUpd.total_earned = admin.firestore.FieldValue.increment(creditReward);
+          }
+          t.update(inviterRef, invUpd);
+          t.update(db.collection('users').doc(userId), { referralCredited: true });
+        });
+      }
+    } catch (refErr) { console.warn("Referral credit error:", refErr.message); }
+
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("daily-checkin error:", err);
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════
+// CREATE CREDIT ORDER (server-controlled, with coupon)
+// ════════════════════════════════════════════════════
+app.post('/create-credit-order', async (req, res) => {
+  try {
+    const { userId, followers, baseCost, instagram_username, instagram_link, couponId, isFirstFree } = req.body;
+    if (!userId || followers === undefined) return res.json({ success: false, message: "Missing fields" });
+    if (!isFirstFree && !instagram_username) return res.json({ success: false, message: "Instagram username required" });
+
+    // Valid follower/cost packages (server-enforced)
+    const PACKAGES = { 3: 5, 10: 11, 25: 25, 50: 49, 100: 95, 500: 450, 1000: 750, 2000: 1111 };
+    const fNum = Number(followers);
+    let cost = isFirstFree ? 0 : Number(baseCost);
+
+    if (!isFirstFree && PACKAGES[fNum] === undefined) {
+      return res.json({ success: false, message: "Invalid package" });
+    }
+    if (!isFirstFree && cost > PACKAGES[fNum]) {
+      return res.json({ success: false, message: "Invalid cost" });
+    }
+
+    const userRef = db.collection('users').doc(userId);
+    let completionTime, couponDiscount = 0, couponCode = null;
+
+    // Validate + apply coupon server-side
+    if (couponId && !isFirstFree) {
+      const cSnap = await db.collection('coupons').doc(couponId).get();
+      if (cSnap.exists) {
+        const c = cSnap.data();
+        const active = c.active && (!c.expiry || new Date(c.expiry) >= new Date()) &&
+                       (c.maxUses === 0 || (c.usedCount || 0) < c.maxUses);
+        if (active && (c.validFor === 'both' || c.validFor === 'credits')) {
+          let disc = Math.round((cost * c.discount) / 100);
+          if (c.maxDiscount > 0) disc = Math.min(disc, c.maxDiscount);
+          cost = Math.max(cost - disc, 0);
+          couponDiscount = c.discount;
+          couponCode = c.code;
+        }
+      }
+    }
+
+    await db.runTransaction(async (t) => {
+      const snap = await t.get(userRef);
+      if (!snap.exists) throw new Error("User not found");
+      const d = snap.data();
+
+      // First free order check
+      if (isFirstFree && (d.total_followers_ordered || 0) > 0) {
+        throw new Error("Free order already used");
+      }
+      if (!isFirstFree && (d.credits || 0) < cost) {
+        throw new Error("Not enough credits");
+      }
+      if ((d.total_followers_ordered || 0) + fNum >= 100000) {
+        throw new Error("Max 100,000 followers per account");
+      }
+
+      const hours = d.current_delivery_hours || 24;
+      completionTime = new Date(Date.now() + hours * 60 * 60 * 1000);
+
+      const upd = { total_followers_ordered: admin.firestore.FieldValue.increment(fNum) };
+      if (!isFirstFree && cost > 0) upd.credits = admin.firestore.FieldValue.increment(-cost);
+      t.update(userRef, upd);
+    });
+
+    const orderDoc = {
+      user_id: userId,
+      instagram_username: instagram_username || "",
+      instagram_link: instagram_link || "",
+      followers: fNum,
+      credits_spent: cost,
+      order_time: admin.firestore.FieldValue.serverTimestamp(),
+      completion_time: admin.firestore.Timestamp.fromDate(completionTime),
+      status: "processing"
+    };
+    if (isFirstFree) orderDoc.isFirstOrderFree = true;
+    const orderRef = await db.collection('orders').add(orderDoc);
+
+    await db.collection('transactions').add({
+      user_id: userId,
+      action: isFirstFree ? `First Free Order (${fNum} followers)` : `Order ${fNum} followers`,
+      amount: -cost,
+      date: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // Redeem coupon
+    if (couponId && couponCode) {
+      try {
+        await db.collection('coupons').doc(couponId).update({
+          usedCount: admin.firestore.FieldValue.increment(1)
+        });
+        await db.collection('coupon_redemptions').add({
+          couponId, userId, orderId: orderRef.id,
+          redeemedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+      } catch (e) { console.warn("coupon redeem:", e.message); }
+    }
+
+    res.json({ success: true, orderId: orderRef.id, finalCost: cost, completionTime: completionTime.toISOString() });
+  } catch (err) {
+    console.error("create-credit-order error:", err);
+    res.json({ success: false, message: err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════
 // PRIME AI CHAT
 // ════════════════════════════════════════════════════
 
@@ -712,8 +975,7 @@ app.post('/instagram-lookup', async (req, res) => {
         console.warn("Profile pic proxy failed:", imgErr.message);
       }
     }
-    // Never send the raw CDN url to the client (it will 403). Only base64.
-    profileData.profilePic = "";
+    // Keep profilePic url too (frontend uses /ig-image proxy as fallback)
 
     res.json({ success: true, profile: profileData });
 
@@ -1155,6 +1417,34 @@ app.post('/diamond-unlock', async (req, res) => {
   } catch (err) {
     console.error("diamond-unlock error:", err);
     res.json({ success: false, message: err.message || "Server error" });
+  }
+});
+
+// ════════════════════════════════════════════════════
+// INSTAGRAM IMAGE PROXY (streams CDN image, bypasses 403)
+// ════════════════════════════════════════════════════
+app.get('/ig-image', async (req, res) => {
+  try {
+    const url = req.query.url;
+    if (!url || !/cdninstagram|fbcdn/.test(url)) {
+      return res.status(400).send('Invalid url');
+    }
+    const imgResp = await fetch(url, {
+      headers: {
+        'User-Agent': 'Instagram 275.0.0.27.98 Android (33/13; 420dpi; 1080x2400; samsung; SM-G991B; o1s; exynos2100; en_US; 458229237)',
+        'Accept': 'image/webp,image/jpeg,image/png,*/*',
+        'Referer': 'https://www.instagram.com/'
+      }
+    });
+    if (!imgResp.ok) return res.status(404).send('Not found');
+    res.set('Content-Type', imgResp.headers.get('content-type') || 'image/jpeg');
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.set('Access-Control-Allow-Origin', '*');
+    const buffer = await imgResp.buffer();
+    res.send(buffer);
+  } catch (err) {
+    console.error('ig-image error:', err.message);
+    res.status(500).send('Error');
   }
 });
 
