@@ -521,15 +521,17 @@ app.post('/chat', async (req, res) => {
       'https://openrouter.ai/api/v1/chat/completions',
       {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
+      headers: {
+        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://prime-follower.web.app',
+        'X-Title': 'Prime Follower'
+      },
         body: JSON.stringify({
-          model: 'google/gemini-2.0-flash-001',
-          messages,
-          temperature: 0.7,
-          max_tokens: 200
+        model: 'google/gemini-2.0-flash-exp:free',
+        messages,
+        temperature: 0.7,
+        max_tokens: 300
         })
       }
     );
@@ -950,8 +952,17 @@ app.post('/instagram-lookup', async (req, res) => {
       }
     }
 
+    // Fallback: Instagram blocks server IPs often. Accept the username manually
+    // so users can always connect (link is always valid format).
     if (!profileData) {
-      return res.json({ success: false, message: "Instagram account not found" });
+      profileData = {
+        username: cleanUsername,
+        fullName: cleanUsername,
+        profilePic: "",
+        isPrivate: false,
+        profileLink: `https://www.instagram.com/${cleanUsername}/`,
+        unverified: true
+      };
     }
 
     // Proxy the profile picture to base64 (Instagram CDN blocks direct hotlinking with 403)
