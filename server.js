@@ -515,6 +515,7 @@ app.post('/create-credit-order', async (req, res) => {
 
 app.post('/chat', async (req, res) => {
   try {
+    console.log("🤖 CHAT route hit — VERSION llama-3.3");
     const { messages } = req.body;
 
     const response = await fetch(
@@ -528,7 +529,7 @@ app.post('/chat', async (req, res) => {
         'X-Title': 'Prime Follower'
       },
         body: JSON.stringify({
-        model: 'google/gemini-2.0-flash-exp:free',
+        model: 'google/gemini-flash-1.5',
         messages,
         temperature: 0.7,
         max_tokens: 300
