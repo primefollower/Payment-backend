@@ -529,7 +529,7 @@ app.post('/chat', async (req, res) => {
         'X-Title': 'Prime Follower'
       },
         body: JSON.stringify({
-        model: 'google/gemini-flash-1.5',
+   model: 'meta-llama/llama-3.3-70b-instruct:free',
         messages,
         temperature: 0.7,
         max_tokens: 300
